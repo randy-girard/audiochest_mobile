@@ -1,0 +1,7 @@
+{
+  "name": "AudioChestApp",
+  "integrations": {
+    "capacitor": {}
+  },
+  "type": "react"
+}
