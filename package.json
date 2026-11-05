@@ -1,8 +1,9 @@
 {
   "name": "AudioChestApp",
-  "version": "0.0.1",
+  "version": "1.1.1",
   "private": true,
   "dependencies": {
+    "@capacitor/android": "^2.4.7",
     "@capacitor/core": "2.4.7",
     "@ionic/react": "^5.5.0",
     "@ionic/react-router": "^5.5.0",
@@ -37,8 +38,9 @@
     "workbox-streams": "^5.1.4"
   },
   "scripts": {
-    "start": "react-scripts start",
-    "build": "react-scripts build",
+    "start": "node scripts/fix-postcss-exports.js && react-scripts --openssl-legacy-provider start",
+    "build": "node scripts/fix-postcss-exports.js && GENERATE_SOURCEMAP=false react-scripts --openssl-legacy-provider build",
+    "apk": "bash scripts/build-apk.sh",
     "test": "react-scripts test",
     "eject": "react-scripts eject"
   },
