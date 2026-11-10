@@ -5,6 +5,7 @@ import {
   applyGradle,
   applyPackageVersion,
   decideRelease,
+  readChangeLines,
   releaseNotes,
 } from './release-version.mjs';
 
@@ -86,8 +87,17 @@ test('an older override is rejected', () => {
 });
 
 test('version edits and release notes keep the contract the app parses', () => {
-  const notes = releaseNotes('1.4.0', 9);
-  assert.match(notes, /^versionName: 1\.4\.0\nversionCode: 9\n/);
+  const notes = releaseNotes('1.4.0', 9, [
+    'Resume play when a paused seek cancels the first play.',
+    'Resume play when a paused seek cancels the first play.',
+    '  ',
+  ]);
+  assert.match(notes, /^## AudioChest 1\.4\.0\n\n- Resume play when a paused seek cancels the first play\.\n/);
+  assert.equal(notes.match(/Resume play/g).length, 1);
+  assert.match(notes, /versionName: 1\.4\.0/);
+  assert.match(notes, /versionCode: 9/);
+  assert.deepEqual(readChangeLines('One\n\nOne\nTwo\n'), ['One', 'Two']);
+  assert.match(releaseNotes('1.4.0', 9), /No new changes since the last release/);
   assert.equal(
     applyGradle('versionCode 3\nversionName "1.1.1"\n', '1.4.0', 9),
     'versionCode 9\nversionName "1.4.0"\n',

@@ -51,6 +51,9 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
       - uses: actions/setup-java@v5
         with:
@@ -85,10 +88,17 @@ jobs:
           fi
           DISPATCH=false
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then DISPATCH=true; fi
+          LATEST_TAG="$(tr -d '[:space:]' < /tmp/latest-tag.txt)"
+          if [ -n "$LATEST_TAG" ]; then
+            git log "${LATEST_TAG}..HEAD" --no-merges --pretty=format:%s > /tmp/changes.txt
+          else
+            git log -15 --no-merges --pretty=format:%s > /tmp/changes.txt
+          fi
           node scripts/release-version.mjs \
             --has-release "$HAS_RELEASE" \
-            --latest-tag "$(cat /tmp/latest-tag.txt)" \
+            --latest-tag "$LATEST_TAG" \
             --latest-body-file /tmp/latest-body.txt \
+            --changes-file /tmp/changes.txt \
             --override "${OVERRIDE:-}" \
             --bump "${BUMP:-patch}" \
             --dispatch "$DISPATCH" \

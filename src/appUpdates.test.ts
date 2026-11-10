@@ -47,6 +47,24 @@ describe('app updates', () => {
     expect(updateIdentity(parsed!)).toBe('4');
   });
 
+  it('reads the version hidden under a changelog', () => {
+    const parsed = parseRelease({
+      tag_name: 'v1.4.0',
+      body: [
+        '## AudioChest 1.4.0',
+        '',
+        '- Add a short changelog to each GitHub release.',
+        '',
+        '<!--',
+        'versionName: 1.4.0',
+        'versionCode: 9',
+        '-->',
+      ].join('\n'),
+      assets: [{ name: 'AudioChest.apk', browser_download_url: 'https://github.com/randy-girard/audiochest_mobile/releases/download/v1.4.0/AudioChest.apk' }],
+    });
+    expect(parsed).toMatchObject({ versionName: '1.4.0', versionCode: 9 });
+  });
+
   it('falls back to the tag when the notes omit the version', () => {
     const parsed = parseRelease({
       tag_name: 'v1.3.0',

@@ -100,13 +100,32 @@ export function applyAppVersion(text, versionName, versionCode) {
     .replace(/export const APP_VERSION_CODE = \d+;/, `export const APP_VERSION_CODE = ${versionCode};`);
 }
 
-export function releaseNotes(versionName, versionCode) {
+export function readChangeLines(text) {
+  const seen = new Set();
+  const changes = [];
+  for (const line of String(text || '').split(/\r?\n/)) {
+    const subject = line.trim().replace(/\s+/g, ' ');
+    if (!subject || seen.has(subject)) continue;
+    seen.add(subject);
+    changes.push(subject);
+  }
+  return changes;
+}
+
+export function releaseNotes(versionName, versionCode, changes = []) {
+  const items = readChangeLines(Array.isArray(changes) ? changes.join('\n') : changes);
+  const list = items.length
+    ? items.map((item) => `- ${item}`).join('\n')
+    : '- No new changes since the last release.';
   return [
+    `## AudioChest ${versionName}`,
+    '',
+    list,
+    '',
+    '<!--',
     `versionName: ${versionName}`,
     `versionCode: ${versionCode}`,
-    '',
-    'Android release of AudioChest.',
-    'The phone app reads versionName and versionCode from this release to decide when an update is available.',
+    '-->',
     '',
   ].join('\n');
 }
@@ -121,7 +140,7 @@ function writeVersions(decision, gradlePath, packagePath, updatesPath, notesPath
   fs.writeFileSync(gradlePath, applyGradle(fs.readFileSync(gradlePath, 'utf8'), decision.versionName, decision.versionCode));
   fs.writeFileSync(packagePath, applyPackageVersion(fs.readFileSync(packagePath, 'utf8'), decision.versionName));
   fs.writeFileSync(updatesPath, applyAppVersion(fs.readFileSync(updatesPath, 'utf8'), decision.versionName, decision.versionCode));
-  fs.writeFileSync(notesPath, releaseNotes(decision.versionName, decision.versionCode));
+  fs.writeFileSync(notesPath, releaseNotes(decision.versionName, decision.versionCode, decision.changes || []));
 }
 
 function main() {
@@ -140,17 +159,22 @@ function main() {
   const body = bodyFile ? fs.readFileSync(bodyFile, 'utf8') : arg(args, '--latest-body', '');
   const parsed = readReleaseBody(body);
   const tag = arg(args, '--latest-tag', '').replace(/^v/i, '');
-  const decision = decideRelease({
-    gradle,
-    latest: {
-      versionName: parsed.versionName || tag,
-      versionCode: parsed.versionCode,
-    },
-    override: arg(args, '--override', ''),
-    bumpLevel: arg(args, '--bump', 'patch'),
-    hasRelease: arg(args, '--has-release', 'false') === 'true',
-    dispatch: arg(args, '--dispatch', 'false') === 'true',
-  });
+  const changesFile = arg(args, '--changes-file', '');
+  const changes = changesFile ? readChangeLines(fs.readFileSync(changesFile, 'utf8')) : [];
+  const decision = {
+    ...decideRelease({
+      gradle,
+      latest: {
+        versionName: parsed.versionName || tag,
+        versionCode: parsed.versionCode,
+      },
+      override: arg(args, '--override', ''),
+      bumpLevel: arg(args, '--bump', 'patch'),
+      hasRelease: arg(args, '--has-release', 'false') === 'true',
+      dispatch: arg(args, '--dispatch', 'false') === 'true',
+    }),
+    changes,
+  };
   if (args.includes('--write')) writeVersions(decision, gradlePath, packagePath, updatesPath, notesPath);
   process.stdout.write(`${JSON.stringify(decision)}\n`);
 }
