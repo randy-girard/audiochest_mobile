@@ -3,14 +3,18 @@ import {
   canRetryAbortedPlay,
   classifyPlayFailure,
   decideEndedEvent,
+  decidePlaySettlement,
   nextPlaybackStep,
   decidePauseEvent,
   isDuplicateTransport,
   nextToggleAction,
+  playRetryDelay,
   shouldApplyRemoteTransport,
   shouldIgnoreInterrupt,
   shouldIgnorePlayRejection,
+  shouldIssuePlay,
   shouldRestorePlayback,
+  shouldResumeAfterIgnoredPause,
 } from './playbackLifecycle';
 
 describe('decidePauseEvent', () => {
@@ -48,6 +52,19 @@ describe('nextToggleAction', () => {
 
   it('pauses if audio is still running after a pause command', () => {
     expect(nextToggleAction(false, false)).toBe('pause');
+    expect(nextToggleAction(false, false, { now: 1_200, lastPauseAt: 1_000 })).toBe('pause');
+  });
+
+  it('plays after a seek even if the element never reported paused', () => {
+    expect(nextToggleAction(false, false, {
+      now: 1_200,
+      lastPauseAt: 1_000,
+      lastSeekAt: 1_100,
+    })).toBe('play');
+  });
+
+  it('plays once a pause has had time to land and the button shows play', () => {
+    expect(nextToggleAction(false, false, { now: 2_000, lastPauseAt: 1_000 })).toBe('play');
   });
 });
 
@@ -154,6 +171,59 @@ describe('classifyPlayFailure', () => {
       wantPlaying: true,
       errorName: 'NotAllowedError',
     })).toBe('stop');
+  });
+});
+
+describe('decidePlaySettlement', () => {
+  const base = {
+    generationMatch: true,
+    wantPlaying: true,
+    paused: true,
+    seeking: false,
+    loading: false,
+    retries: 0,
+    unlocked: true,
+  };
+
+  it('retries when the first play resolves but the element stays paused', () => {
+    expect(decidePlaySettlement(base)).toBe('retry');
+    expect(playRetryDelay(1, false)).toBe(0);
+  });
+
+  it('retries an aborted seek without treating a later denial as a user pause', () => {
+    expect(decidePlaySettlement({ ...base, seeking: true, errorName: 'AbortError' })).toBe('retry');
+    expect(decidePlaySettlement({ ...base, errorName: 'NotAllowedError', unlocked: true })).toBe('retry');
+    expect(playRetryDelay(2, true)).toBe(200);
+  });
+
+  it('stops when autoplay was never allowed', () => {
+    expect(decidePlaySettlement({ ...base, errorName: 'NotAllowedError', unlocked: false })).toBe('stop');
+  });
+
+  it('does not retry a play that actually started or one the user cancelled', () => {
+    expect(decidePlaySettlement({ ...base, paused: false })).toBe('ignore');
+    expect(decidePlaySettlement({ ...base, wantPlaying: false })).toBe('ignore');
+    expect(decidePlaySettlement({ ...base, loading: true, errorName: 'AbortError' })).toBe('ignore');
+  });
+
+  it('keeps trying through a long seek, then lets a finished seek start the song', () => {
+    expect(decidePlaySettlement({ ...base, seeking: true, retries: 11 })).toBe('retry');
+    expect(decidePlaySettlement({ ...base, seeking: true, retries: 12 })).toBe('ignore');
+    expect(shouldResumeAfterIgnoredPause({
+      decision: 'ignore',
+      paused: true,
+      wantPlaying: true,
+      loading: false,
+      seeking: false,
+      retries: 0,
+    })).toBe(true);
+    expect(shouldIssuePlay({
+      wantPlaying: true,
+      paused: true,
+      seeking: true,
+      allowDuringSeek: true,
+      kickIfRunning: false,
+    })).toBe('play');
   });
 });
 

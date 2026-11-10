@@ -17,17 +17,13 @@ import {
 import { RepeatMode, cycleRepeatMode, nextIndexOnEnd, sameTrackQueue } from './playerAdvance';
 import {
   applyPendingSeek as resolvePendingSeek,
-  canRetryAbortedPlay,
-  classifyPlayFailure,
   decideEndedEvent,
-  decidePauseEvent,
   isDuplicateTransport,
-  nextPlaybackStep,
-  nextToggleAction,
   shouldApplyRemoteTransport,
   shouldIgnoreInterrupt,
   shouldRestorePlayback,
 } from './playbackLifecycle';
+import { dispatchPlayback, PlaybackController, PlaybackEffect } from './playbackSession';
 import { previousFromHistory, pushPlayHistory } from './playerHistory';
 import { nextShuffledIndex, rememberTrack } from './playerShuffle';
 import {
@@ -125,22 +121,19 @@ export const PlayerProvider: React.FC = ({ children }) => {
   });
   const lastNativeAt = useRef(0);
   const lastNativeSig = useRef('');
-  const wantPlayingRef = useRef(false);
+  const sessionRef = useRef(new PlaybackController());
+  const dispatchRef = useRef<(effects: PlaybackEffect[]) => void>(() => undefined);
   const syncNowPlayingRef = useRef<(force?: boolean) => void>(() => undefined);
   const persistSnapshotRef = useRef<(force?: boolean) => void>(() => undefined);
   const sessionKeyRef = useRef(sessionKey);
   const clientRef = useRef(client);
   const pendingSeekRef = useRef(0);
-  const loadingRef = useRef(false);
   const interruptedRef = useRef(false);
   const lastPersistAt = useRef(0);
   const pendingPlayRef = useRef(false);
   const pendingRemoteRef = useRef<NowPlayingAction | null>(null);
   const restoredKeyRef = useRef('');
-  const playGenRef = useRef(0);
-  const playRetriesRef = useRef(0);
   const playRetryTimer = useRef(0);
-  const tryPlayIfWantedRef = useRef<(audio: HTMLAudioElement, allowDuringSeek?: boolean) => void>(() => undefined);
   const lastPlayCommandAt = useRef(0);
   const lastPauseCommandAt = useRef(0);
 
@@ -181,7 +174,7 @@ export const PlayerProvider: React.FC = ({ children }) => {
       index: indexRef.current,
       position: audio ? audio.currentTime || 0 : 0,
       duration: audio && Number.isFinite(audio.duration) ? audio.duration : 0,
-      wasPlaying: wantPlayingRef.current || interruptedRef.current,
+      wasPlaying: sessionRef.current.wantPlaying || interruptedRef.current,
       interrupted: interruptedRef.current,
       history: historyRef.current,
       updatedAt: now,
@@ -217,50 +210,24 @@ export const PlayerProvider: React.FC = ({ children }) => {
     playRetryTimer.current = 0;
   }, []);
 
-  const handlePlayFailure = useCallback((playGen: number, error?: { name?: string }) => {
-    const decision = classifyPlayFailure({
-      generationMatch: playGenRef.current === playGen,
-      wantPlaying: wantPlayingRef.current,
-      errorName: error && error.name,
+  dispatchRef.current = (effects) => {
+    dispatchPlayback(sessionRef.current, effects, audioRef.current, {
+      showPlaying: () => setPlaying(true),
+      showPaused: () => setPlaying(false),
+      schedule: (generation, delay) => {
+        clearPlayRetry();
+        const run = () => {
+          playRetryTimer.current = 0;
+          dispatchRef.current(sessionRef.current.onRetry(generation));
+        };
+        if (delay <= 0) {
+          queueMicrotask(run);
+          return;
+        }
+        playRetryTimer.current = window.setTimeout(run, delay);
+      },
     });
-    if (decision === 'ignore') return;
-    if (decision === 'retry') {
-      if (loadingRef.current || !canRetryAbortedPlay(playRetriesRef.current)) return;
-      playRetriesRef.current += 1;
-      const delay = playRetriesRef.current === 1 ? 0 : 80;
-      clearPlayRetry();
-      playRetryTimer.current = window.setTimeout(() => {
-        playRetryTimer.current = 0;
-        const audio = audioRef.current;
-        if (!audio || playGenRef.current !== playGen) return;
-        tryPlayIfWantedRef.current(audio, true);
-      }, delay);
-      return;
-    }
-    clearPlayRetry();
-    wantPlayingRef.current = false;
-    loadingRef.current = false;
-    setPlaying(false);
-    syncNowPlayingRef.current(true);
-  }, [clearPlayRetry]);
-
-  const tryPlayIfWanted = useCallback((audio: HTMLAudioElement, allowDuringSeek = false) => {
-    const step = nextPlaybackStep({
-      wantPlaying: wantPlayingRef.current,
-      paused: audio.paused,
-      seeking: Boolean(audio.seeking),
-      allowDuringSeek,
-    });
-    if (step !== 'play') return;
-    const playGen = playGenRef.current;
-    const result = audio.play();
-    if (result && typeof result.catch === 'function') {
-      result.catch((error: { name?: string }) => {
-        handlePlayFailure(playGen, error);
-      });
-    }
-  }, [handlePlayFailure]);
-  tryPlayIfWantedRef.current = tryPlayIfWanted;
+  };
 
   const load = useCallback((tracks: Track[], start: number, autoplay: boolean, position = 0) => {
     const api = clientRef.current;
@@ -270,15 +237,10 @@ export const PlayerProvider: React.FC = ({ children }) => {
     const track = playable[start];
     const audio = audioRef.current;
     if (!audio) return;
-    loadingRef.current = true;
-    wantPlayingRef.current = autoplay;
     interruptedRef.current = false;
     pendingSeekRef.current = position > 0 ? position : 0;
-    const playGen = ++playGenRef.current;
-    if (autoplay) {
-      lastPlayCommandAt.current = Date.now();
-      setPlaying(true);
-    }
+    if (autoplay) lastPlayCommandAt.current = Date.now();
+    const effects = sessionRef.current.armLoad(autoplay);
     audio.src = api.audioSrc(track);
     audio.setAttribute('title', displayTitle(track));
     setQueue(playable);
@@ -289,20 +251,10 @@ export const PlayerProvider: React.FC = ({ children }) => {
     indexRef.current = start;
     recentRef.current = rememberTrack(recentRef.current, track.id);
     playedRef.current.add(track.id);
-    if (autoplay) {
-      const result = audio.play();
-      if (result && typeof result.catch === 'function') {
-        result.catch((error: { name?: string }) => {
-          handlePlayFailure(playGen, error);
-        });
-      }
-    } else {
-      loadingRef.current = false;
-      setPlaying(false);
-    }
+    dispatchRef.current(effects);
     persistSnapshotRef.current(true);
     syncNowPlayingRef.current(true);
-  }, [handlePlayFailure]);
+  }, []);
 
   loadRef.current = load;
 
@@ -311,18 +263,10 @@ export const PlayerProvider: React.FC = ({ children }) => {
     if (!audio) return;
     audio.currentTime = 0;
     setCurrentTime(0);
-    wantPlayingRef.current = true;
     interruptedRef.current = false;
     lastPlayCommandAt.current = Date.now();
-    setPlaying(true);
-    const playGen = ++playGenRef.current;
-    const result = audio.play();
-    if (result && typeof result.catch === 'function') {
-      result.catch((error: { name?: string }) => {
-        handlePlayFailure(playGen, error);
-      });
-    }
-  }, [handlePlayFailure]);
+    dispatchRef.current(sessionRef.current.requestPlay(Date.now()));
+  }, []);
 
   const playNextFrom = useCallback((fromIndex: number, fromEnded = false) => {
     const items = queueRef.current.filter((track) => track.id);
@@ -345,7 +289,7 @@ export const PlayerProvider: React.FC = ({ children }) => {
         repeat: repeatRef.current,
       });
       if (nextIndex == null) {
-        wantPlayingRef.current = false;
+        sessionRef.current.noteEnded();
         setPlaying(false);
         persistSnapshotRef.current(true);
         syncNowPlayingRef.current(true);
@@ -373,36 +317,34 @@ export const PlayerProvider: React.FC = ({ children }) => {
     audioRef.current = audio;
     const onEnded = () => {
       if (decideEndedEvent({
-        wantPlaying: wantPlayingRef.current,
+        wantPlaying: sessionRef.current.wantPlaying,
         duration: Number.isFinite(audio.duration) ? audio.duration : 0,
       }) === 'ignore') return;
-      wantPlayingRef.current = false;
+      sessionRef.current.noteEnded();
       interruptedRef.current = false;
       playNextFrom(indexRef.current, true);
     };
     const syncPlayback = () => {
-      const decision = decidePauseEvent({
+      const outcome = sessionRef.current.onTransportEvent({
         paused: audio.paused,
-        wantPlaying: wantPlayingRef.current,
-        loading: loadingRef.current,
+        seeking: Boolean(audio.seeking),
       });
-      if (decision === 'playing') {
-        loadingRef.current = false;
+      if (outcome.decision === 'playing') {
         interruptedRef.current = false;
-        setPlaying(true);
+        dispatchRef.current(outcome.effects);
         persistSnapshotRef.current(false);
         syncNowPlayingRef.current(true);
         return;
       }
-      if (decision === 'ignore') return;
-      if (decision === 'suppress') {
+      if (outcome.decision === 'suppress') {
         queueMicrotask(() => {
-          if (!wantPlayingRef.current && !audio.paused) audio.pause();
+          if (!sessionRef.current.wantPlaying && !audio.paused) audio.pause();
         });
         return;
       }
+      if (outcome.effects.length) dispatchRef.current(outcome.effects);
+      if (outcome.decision === 'ignore') return;
       interruptedRef.current = false;
-      setPlaying(false);
       persistSnapshotRef.current(true);
       syncNowPlayingRef.current(true);
     };
@@ -415,8 +357,10 @@ export const PlayerProvider: React.FC = ({ children }) => {
     const onLoaded = () => {
       applyPendingSeek(audio);
       syncTimes(audio);
-      if (!wantPlayingRef.current) loadingRef.current = false;
-      tryPlayIfWanted(audio);
+      dispatchRef.current(sessionRef.current.onCanPlay({
+        paused: audio.paused,
+        seeking: Boolean(audio.seeking),
+      }));
       syncNowPlayingRef.current(true);
     };
     audio.addEventListener('ended', onEnded);
@@ -427,8 +371,10 @@ export const PlayerProvider: React.FC = ({ children }) => {
     audio.addEventListener('loadedmetadata', onLoaded);
     audio.addEventListener('durationchange', onTime);
     const onSeeked = () => {
-      playRetriesRef.current = 0;
-      tryPlayIfWanted(audio);
+      dispatchRef.current(sessionRef.current.onSeeked({
+        paused: audio.paused,
+        seeking: Boolean(audio.seeking),
+      }));
     };
     audio.addEventListener('canplay', onLoaded);
     audio.addEventListener('seeked', onSeeked);
@@ -451,7 +397,7 @@ export const PlayerProvider: React.FC = ({ children }) => {
       audio.remove();
       audioRef.current = null;
     };
-  }, [applyPendingSeek, playNextFrom, syncTimes, tryPlayIfWanted]);
+  }, [applyPendingSeek, playNextFrom, syncTimes]);
 
   const restoreSnapshot = useCallback((autoplay: boolean) => {
     const key = sessionKeyRef.current;
@@ -482,7 +428,8 @@ export const PlayerProvider: React.FC = ({ children }) => {
   const play = useCallback(() => {
     const audio = audioRef.current;
     if (!audio) return;
-    lastPlayCommandAt.current = Date.now();
+    const now = Date.now();
+    lastPlayCommandAt.current = now;
     if (!queueRef.current.length) {
       pendingPlayRef.current = true;
       if (!restoreSnapshot(true)) return;
@@ -491,48 +438,34 @@ export const PlayerProvider: React.FC = ({ children }) => {
     }
     pendingPlayRef.current = false;
     interruptedRef.current = false;
-    wantPlayingRef.current = true;
-    playRetriesRef.current = 0;
     clearPlayRetry();
-    setPlaying(true);
-    playGenRef.current += 1;
-    tryPlayIfWantedRef.current(audio, true);
+    dispatchRef.current(sessionRef.current.requestPlay(now));
     persistSnapshotRef.current(true);
     syncNowPlayingRef.current(true);
   }, [clearPlayRetry, restoreSnapshot]);
 
   const pause = useCallback(() => {
-    lastPauseCommandAt.current = Date.now();
-    playGenRef.current += 1;
-    playRetriesRef.current = 0;
+    const now = Date.now();
+    lastPauseCommandAt.current = now;
     clearPlayRetry();
     interruptedRef.current = false;
-    wantPlayingRef.current = false;
-    loadingRef.current = false;
     pendingPlayRef.current = false;
-    setPlaying(false);
-    const audio = audioRef.current;
-    if (audio) audio.pause();
+    dispatchRef.current(sessionRef.current.requestPause(now));
     persistSnapshotRef.current(true);
     syncNowPlayingRef.current(true);
   }, [clearPlayRetry]);
 
   const interrupt = useCallback(() => {
     if (shouldIgnoreInterrupt({
-      loading: loadingRef.current,
+      loading: sessionRef.current.loading,
       lastPlayCommandAt: lastPlayCommandAt.current,
       now: Date.now(),
     })) return;
-    lastPauseCommandAt.current = Date.now();
-    playGenRef.current += 1;
-    playRetriesRef.current = 0;
+    const now = Date.now();
+    lastPauseCommandAt.current = now;
     clearPlayRetry();
-    const audio = audioRef.current;
     interruptedRef.current = true;
-    wantPlayingRef.current = false;
-    loadingRef.current = false;
-    if (audio && !audio.paused) audio.pause();
-    setPlaying(false);
+    dispatchRef.current(sessionRef.current.requestPause(now));
     persistSnapshotRef.current(true);
     syncNowPlayingRef.current(true);
   }, [clearPlayRetry]);
@@ -540,9 +473,25 @@ export const PlayerProvider: React.FC = ({ children }) => {
   const toggle = useCallback(() => {
     const audio = audioRef.current;
     if (!audio || !queueRef.current.length) return;
-    if (nextToggleAction(wantPlayingRef.current, audio.paused) === 'pause') pause();
-    else play();
-  }, [pause, play]);
+    const now = Date.now();
+    const effects = sessionRef.current.requestToggle(now, {
+      paused: audio.paused,
+      seeking: Boolean(audio.seeking),
+    });
+    if (effects.some((effect) => effect.type === 'pause')) {
+      lastPauseCommandAt.current = now;
+      interruptedRef.current = false;
+      pendingPlayRef.current = false;
+    } else {
+      lastPlayCommandAt.current = now;
+      interruptedRef.current = false;
+      pendingPlayRef.current = false;
+    }
+    clearPlayRetry();
+    dispatchRef.current(effects);
+    persistSnapshotRef.current(true);
+    syncNowPlayingRef.current(true);
+  }, [clearPlayRetry]);
 
   const next = useCallback(() => {
     playNextFrom(indexRef.current, false);
@@ -574,9 +523,9 @@ export const PlayerProvider: React.FC = ({ children }) => {
     if (!audio) return;
     const max = Number.isFinite(audio.duration) ? audio.duration : seconds;
     const nextTime = Math.max(0, Math.min(seconds, max || seconds));
+    sessionRef.current.noteSeek(Date.now());
     audio.currentTime = nextTime;
     setCurrentTime(nextTime);
-    playRetriesRef.current = 0;
     persistSnapshotRef.current(true);
     syncNowPlayingRef.current(true);
   }, []);
@@ -587,9 +536,9 @@ export const PlayerProvider: React.FC = ({ children }) => {
     const current = audio.currentTime || 0;
     const max = Number.isFinite(audio.duration) ? audio.duration : Math.max(0, current + delta);
     const nextTime = Math.max(0, Math.min(current + delta, max || 0));
+    sessionRef.current.noteSeek(Date.now());
     audio.currentTime = nextTime;
     setCurrentTime(nextTime);
-    playRetriesRef.current = 0;
     persistSnapshotRef.current(true);
     syncNowPlayingRef.current(true);
   }, []);
@@ -612,14 +561,13 @@ export const PlayerProvider: React.FC = ({ children }) => {
 
   const stop = useCallback(() => {
     const audio = audioRef.current;
-    playGenRef.current += 1;
-    playRetriesRef.current = 0;
+    const now = Date.now();
     clearPlayRetry();
-    lastPauseCommandAt.current = Date.now();
-    wantPlayingRef.current = false;
+    lastPauseCommandAt.current = now;
     interruptedRef.current = false;
+    pendingPlayRef.current = false;
+    dispatchRef.current(sessionRef.current.requestPause(now));
     if (audio) {
-      audio.pause();
       audio.removeAttribute('src');
       audio.removeAttribute('title');
       audio.load();
@@ -680,7 +628,7 @@ export const PlayerProvider: React.FC = ({ children }) => {
     const info = nowPlayingInfo(track, {
       currentTime: audio ? audio.currentTime || 0 : 0,
       duration: audio && Number.isFinite(audio.duration) ? audio.duration : 0,
-      playing: audio ? reportedPlaying(audio.paused, wantPlayingRef.current) : false,
+      playing: audio ? reportedPlaying(audio.paused, sessionRef.current.wantPlaying) : false,
       interrupted: interruptedRef.current,
     });
     if (!isNativeAndroid()) applyWebMediaSession(getMediaSession(), info);
@@ -730,7 +678,7 @@ export const PlayerProvider: React.FC = ({ children }) => {
         if (isDuplicateTransport({ action: 'play', lastAction: lastRemote.action, lastActionAt: lastRemote.at, now })) return;
         if (!shouldApplyRemoteTransport({
           action: 'play',
-          wantPlaying: wantPlayingRef.current,
+          wantPlaying: sessionRef.current.wantPlaying,
           lastPlayCommandAt: lastPlayCommandAt.current,
           lastPauseCommandAt: lastPauseCommandAt.current,
           now,
@@ -745,7 +693,7 @@ export const PlayerProvider: React.FC = ({ children }) => {
         if (isDuplicateTransport({ action: 'pause', lastAction: lastRemote.action, lastActionAt: lastRemote.at, now })) return;
         if (!shouldApplyRemoteTransport({
           action: 'pause',
-          wantPlaying: wantPlayingRef.current,
+          wantPlaying: sessionRef.current.wantPlaying,
           lastPlayCommandAt: lastPlayCommandAt.current,
           lastPauseCommandAt: lastPauseCommandAt.current,
           now,
@@ -756,7 +704,7 @@ export const PlayerProvider: React.FC = ({ children }) => {
       },
       interrupt: () => {
         if (shouldIgnoreInterrupt({
-          loading: loadingRef.current,
+          loading: sessionRef.current.loading,
           lastPlayCommandAt: lastPlayCommandAt.current,
           now: Date.now(),
         })) return;

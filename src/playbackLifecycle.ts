@@ -2,6 +2,9 @@ export type PauseDecision = 'playing' | 'ignore' | 'paused' | 'suppress';
 
 export const TRANSPORT_ECHO_MS = 600;
 export const INTERRUPT_GRACE_MS = 800;
+export const PAUSE_TOGGLE_SETTLE_MS = 400;
+export const PLAY_RETRY_LIMIT = 6;
+export const SEEK_PLAY_RETRY_LIMIT = 12;
 
 export function decidePauseEvent(input: {
   paused: boolean;
@@ -16,8 +19,20 @@ export function decidePauseEvent(input: {
   return 'paused';
 }
 
-export function nextToggleAction(wantPlaying: boolean, paused: boolean): 'play' | 'pause' {
-  return wantPlaying || !paused ? 'pause' : 'play';
+export function nextToggleAction(
+  wantPlaying: boolean,
+  paused: boolean,
+  timing?: { now: number; lastPauseAt: number; lastSeekAt?: number; settleMs?: number },
+): 'play' | 'pause' {
+  if (wantPlaying) return 'pause';
+  if (!paused) {
+    if (!timing) return 'pause';
+    const settle = timing.settleMs == null ? PAUSE_TOGGLE_SETTLE_MS : timing.settleMs;
+    const soughtAfterPause = (timing.lastSeekAt || 0) > timing.lastPauseAt;
+    if (!soughtAfterPause && timing.lastPauseAt > 0 && timing.now - timing.lastPauseAt < settle) return 'pause';
+    return 'play';
+  }
+  return 'play';
 }
 
 export function isDuplicateTransport(input: {
@@ -85,6 +100,65 @@ export function nextPlaybackStep(input: {
 
 export function canRetryAbortedPlay(retries: number, limit = 3): boolean {
   return retries < limit;
+}
+
+export function decidePlaySettlement(input: {
+  generationMatch: boolean;
+  wantPlaying: boolean;
+  paused: boolean;
+  seeking: boolean;
+  loading: boolean;
+  errorName?: string;
+  retries: number;
+  unlocked: boolean;
+  limit?: number;
+  seekingLimit?: number;
+}): 'ignore' | 'retry' | 'stop' {
+  if (!input.generationMatch || !input.wantPlaying) return 'ignore';
+  if (!input.paused) return 'ignore';
+  const retryableDenial = input.errorName === 'NotAllowedError' && input.unlocked;
+  if (input.errorName && input.errorName !== 'AbortError' && !retryableDenial) return 'stop';
+  if (input.loading) return 'ignore';
+  const limit = input.seeking
+    ? (input.seekingLimit == null ? SEEK_PLAY_RETRY_LIMIT : input.seekingLimit)
+    : (input.limit == null ? PLAY_RETRY_LIMIT : input.limit);
+  if (input.retries >= limit) return 'ignore';
+  return 'retry';
+}
+
+export function playRetryDelay(attempt: number, seeking: boolean): number {
+  if (attempt <= 1) return 0;
+  return seeking ? 200 : 80;
+}
+
+export function shouldIssuePlay(input: {
+  wantPlaying: boolean;
+  paused: boolean;
+  seeking: boolean;
+  allowDuringSeek: boolean;
+  kickIfRunning: boolean;
+}): 'play' | 'kick' | 'skip' {
+  if (!input.wantPlaying) return 'skip';
+  if (!input.paused) return input.kickIfRunning ? 'kick' : 'skip';
+  if (input.seeking && !input.allowDuringSeek) return 'skip';
+  return 'play';
+}
+
+export function shouldResumeAfterIgnoredPause(input: {
+  decision: PauseDecision;
+  paused: boolean;
+  wantPlaying: boolean;
+  loading: boolean;
+  seeking: boolean;
+  retries: number;
+  retryLimit?: number;
+  seekingRetryLimit?: number;
+}): boolean {
+  if (input.decision !== 'ignore' || !input.paused || !input.wantPlaying || input.loading) return false;
+  const limit = input.seeking
+    ? (input.seekingRetryLimit == null ? SEEK_PLAY_RETRY_LIMIT : input.seekingRetryLimit)
+    : (input.retryLimit == null ? PLAY_RETRY_LIMIT : input.retryLimit);
+  return input.retries < limit;
 }
 
 export function decideEndedEvent(input: {
