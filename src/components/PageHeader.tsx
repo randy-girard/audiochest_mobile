@@ -7,9 +7,10 @@ interface PageHeaderProps {
   backHref?: string;
   extra?: React.ReactNode;
   hideSettings?: boolean;
+  below?: React.ReactNode;
 }
 
-const PageHeader: React.FC<PageHeaderProps> = ({ title, backHref, extra, hideSettings }) => {
+const PageHeader: React.FC<PageHeaderProps> = ({ title, backHref, extra, hideSettings, below }) => {
   return (
     <IonHeader>
       <IonToolbar>
@@ -28,6 +29,7 @@ const PageHeader: React.FC<PageHeaderProps> = ({ title, backHref, extra, hideSet
           )}
         </IonButtons>
       </IonToolbar>
+      {below}
     </IonHeader>
   );
 };

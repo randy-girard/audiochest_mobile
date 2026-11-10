@@ -33,6 +33,7 @@ function snapshot(overrides: Partial<PlaybackSnapshot> = {}): PlaybackSnapshot {
     duration: 240,
     wasPlaying: true,
     interrupted: true,
+    history: [0, 2],
     updatedAt: 1_000,
     ...overrides,
   };
@@ -59,6 +60,7 @@ describe('playback resume snapshot', () => {
       duration: 2,
       wasPlaying: true,
       interrupted: false,
+      history: [],
       updatedAt: 1,
     })).toBeNull();
   });

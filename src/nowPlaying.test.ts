@@ -1,6 +1,7 @@
 import {
   MEDIA_ACTIONS,
   applyWebMediaSession,
+  bindWebMediaSession,
   dispatchNowPlayingAction,
   mediaAlbum,
   mediaArtist,
@@ -89,7 +90,10 @@ describe('reportedPlaying', () => {
   it('stays playing while play() is in flight even if the element is still paused', () => {
     expect(reportedPlaying(true, true)).toBe(true);
     expect(reportedPlaying(false, true)).toBe(true);
-    expect(reportedPlaying(false, false)).toBe(true);
+  });
+
+  it('does not tell Bluetooth we are playing after the user paused', () => {
+    expect(reportedPlaying(false, false)).toBe(false);
     expect(reportedPlaying(true, false)).toBe(false);
   });
 });
@@ -131,6 +135,22 @@ describe('nowPlaying actions', () => {
       'seekbackward',
       'seekforward',
     ]);
+  });
+});
+
+describe('bindWebMediaSession', () => {
+  it('routes shade play and pause through the page session on Android', () => {
+    const next = handlers();
+    const session: MediaSessionLike = {
+      metadata: null,
+      playbackState: 'none',
+      setActionHandler: (action, handler) => {
+        if (action === 'pause' && handler) handler();
+        if (action === 'nexttrack' && handler) handler();
+      },
+    };
+    bindWebMediaSession(session, next);
+    expect(next.calls).toEqual(['pause', 'next']);
   });
 });
 

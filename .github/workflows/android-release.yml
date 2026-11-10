@@ -1,0 +1,134 @@
+name: Android release
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact semantic version override, such as 1.2.0. Leave empty to bump automatically.
+        required: false
+        type: string
+      bump:
+        description: Bump used when the version override is empty.
+        required: false
+        default: patch
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+concurrency:
+  group: android-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.event_name == 'workflow_dispatch' || !contains(github.event.head_commit.message, '[skip release]')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: npm
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Choose the release version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OVERRIDE: ${{ github.event.inputs.version }}
+          BUMP: ${{ github.event.inputs.bump }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          HAS_RELEASE=false
+          printf '' > /tmp/latest-body.txt
+          printf '' > /tmp/latest-tag.txt
+          if gh release view --json tagName,body > /tmp/latest-release.json 2>/dev/null; then
+            HAS_RELEASE=true
+            node --input-type=module -e 'import fs from "fs"; const r = JSON.parse(fs.readFileSync("/tmp/latest-release.json","utf8")); fs.writeFileSync("/tmp/latest-body.txt", r.body || ""); fs.writeFileSync("/tmp/latest-tag.txt", r.tagName || "");'
+          fi
+          DISPATCH=false
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then DISPATCH=true; fi
+          node scripts/release-version.mjs \
+            --has-release "$HAS_RELEASE" \
+            --latest-tag "$(cat /tmp/latest-tag.txt)" \
+            --latest-body-file /tmp/latest-body.txt \
+            --override "${OVERRIDE:-}" \
+            --bump "${BUMP:-patch}" \
+            --dispatch "$DISPATCH" \
+            --write > /tmp/decision.json
+          node --input-type=module -e 'import fs from "fs"; const d = JSON.parse(fs.readFileSync("/tmp/decision.json","utf8")); const out = process.env.GITHUB_OUTPUT; fs.appendFileSync(out, `version_name=${d.versionName}\nversion_code=${d.versionCode}\nreplace=${d.replace}\n`);'
+          echo "Publishing v$(node --input-type=module -e 'import fs from "fs"; process.stdout.write(JSON.parse(fs.readFileSync("/tmp/decision.json","utf8")).versionName)')"
+
+      - name: Build the web app
+        run: |
+          npm run build
+          npx cap sync android
+          node scripts/prepare-android.js
+          node scripts/release-version.mjs --apply-decision /tmp/decision.json
+
+      - name: Decode the release keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ANDROID_KEYSTORE_BASE64}" ] || [ -z "${ANDROID_KEYSTORE_PASSWORD}" ] || [ -z "${ANDROID_KEY_ALIAS}" ]; then
+            echo "Add GitHub secrets ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_PASSWORD, and ANDROID_KEY_ALIAS."
+            exit 1
+          fi
+          umask 077
+          mkdir -p android/keystore
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > android/keystore/audiochest-release.jks
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          password = os.environ["ANDROID_KEYSTORE_PASSWORD"]
+          key_password = os.environ.get("ANDROID_KEY_PASSWORD") or password
+          Path("android/keystore.properties").write_text(
+              "storePassword=%s\nkeyPassword=%s\nkeyAlias=%s\nstoreFile=keystore/audiochest-release.jks\n"
+              % (password, key_password, os.environ["ANDROID_KEY_ALIAS"])
+          )
+          PY
+
+      - name: Assemble the signed release APK
+        working-directory: android
+        run: chmod +x ./gradlew && ./gradlew assembleRelease --no-daemon
+
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION_NAME: ${{ steps.version.outputs.version_name }}
+          REPLACE: ${{ steps.version.outputs.replace }}
+        run: |
+          set -euo pipefail
+          TAG="v${VERSION_NAME}"
+          cp android/app/build/outputs/apk/release/app-release.apk AudioChest.apk
+          if [ "$REPLACE" = "true" ]; then
+            gh release upload "$TAG" AudioChest.apk --clobber
+            gh release edit "$TAG" --title "AudioChest ${TAG}" --notes-file release-notes.md
+          else
+            gh release create "$TAG" AudioChest.apk \
+              --title "AudioChest ${TAG}" \
+              --notes-file release-notes.md
+          fi
+          echo "Published https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}"

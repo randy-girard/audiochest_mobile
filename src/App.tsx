@@ -3,6 +3,7 @@ import { IonReactRouter } from '@ionic/react-router';
 import React from 'react';
 import { Redirect, Route } from 'react-router-dom';
 import { AuthProvider, useAuth } from './AuthContext';
+import AppUpdatePrompt from './components/AppUpdatePrompt';
 import PlayerBar from './components/PlayerBar';
 import { PlayerProvider } from './PlayerContext';
 import Login from './pages/Login';
@@ -55,6 +56,7 @@ const App: React.FC = () => (
     <AuthProvider>
       <PlayerProvider>
         <AppRoutes />
+        <AppUpdatePrompt />
       </PlayerProvider>
     </AuthProvider>
   </IonApp>

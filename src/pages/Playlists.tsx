@@ -9,6 +9,7 @@ import {
   IonRefresherContent,
   IonSearchbar,
   IonSpinner,
+  IonToolbar,
   useIonAlert,
   useIonToast,
   useIonViewWillEnter,
@@ -116,12 +117,18 @@ const Playlists: React.FC = () => {
 
   return (
     <IonPage>
-      <PageHeader title="Playlists" />
+      <PageHeader
+        title="Playlists"
+        below={(
+          <IonToolbar className="search-toolbar">
+            <IonSearchbar value={query} placeholder="Search playlists" onIonChange={(event) => setQuery(event.detail.value || '')} />
+          </IonToolbar>
+        )}
+      />
       <IonContent>
         <IonRefresher slot="fixed" onIonRefresh={async (event) => { await load(); event.detail.complete(); }}>
           <IonRefresherContent />
         </IonRefresher>
-        <IonSearchbar value={query} placeholder="Search playlists" onIonChange={(event) => setQuery(event.detail.value || '')} />
         {loading ? (
           <div className="page-loading"><IonSpinner name="crescent" /></div>
         ) : filtered.length === 0 ? (

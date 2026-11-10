@@ -5,6 +5,7 @@ import {
   IonRefresherContent,
   IonSearchbar,
   IonSpinner,
+  IonToolbar,
   useIonToast,
   useIonViewWillEnter,
 } from '@ionic/react';
@@ -58,12 +59,18 @@ const Tracks: React.FC = () => {
 
   return (
     <IonPage>
-      <PageHeader title="Tracks" />
+      <PageHeader
+        title="Tracks"
+        below={(
+          <IonToolbar className="search-toolbar">
+            <IonSearchbar value={query} placeholder="Search tracks" onIonChange={(event) => setQuery(event.detail.value || '')} />
+          </IonToolbar>
+        )}
+      />
       <IonContent>
         <IonRefresher slot="fixed" onIonRefresh={refresh}>
           <IonRefresherContent />
         </IonRefresher>
-        <IonSearchbar value={query} placeholder="Search tracks" onIonChange={(event) => setQuery(event.detail.value || '')} />
         {loading ? (
           <div className="page-loading"><IonSpinner name="crescent" /></div>
         ) : (

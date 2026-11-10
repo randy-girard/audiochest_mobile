@@ -81,8 +81,8 @@ export function mediaAlbum(track: Track): string {
   return first || '';
 }
 
-export function reportedPlaying(paused: boolean, playRequested: boolean): boolean {
-  return !paused || playRequested;
+export function reportedPlaying(_paused: boolean, playRequested: boolean): boolean {
+  return playRequested;
 }
 
 export function nowPlayingInfo(
@@ -271,17 +271,21 @@ export function updateNativeNowPlaying(info: NowPlayingInfo): Promise<void> {
   }).then(() => undefined, () => undefined);
 }
 
+export function pullPendingNowPlaying(apply: (data: NowPlayingAction) => void): void {
+  const plugin = nativePlugin();
+  if (!plugin || typeof plugin.consumePendingAction !== 'function') return;
+  plugin.consumePendingAction().then((data) => {
+    if (data && data.action) apply(data);
+  }, () => undefined);
+}
+
 export function listenNativeNowPlaying(handlers: NowPlayingHandlers): () => void {
   const plugin = nativePlugin();
   if (!plugin || typeof plugin.addListener !== 'function') return () => undefined;
   const handle = plugin.addListener('action', (data) => {
     dispatchNowPlayingAction(handlers, data || {});
   });
-  if (typeof plugin.consumePendingAction === 'function') {
-    plugin.consumePendingAction().then((data) => {
-      if (data && data.action) dispatchNowPlayingAction(handlers, data);
-    }, () => undefined);
-  }
+  pullPendingNowPlaying((data) => dispatchNowPlayingAction(handlers, data));
   return () => {
     try {
       if (handle && typeof handle.remove === 'function') handle.remove();

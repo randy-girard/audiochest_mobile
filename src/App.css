@@ -1,3 +1,10 @@
+.search-toolbar {
+  --min-height: 52px;
+  --padding-top: 0;
+  --padding-bottom: 4px;
+  --background: var(--ion-toolbar-background, #09090b);
+}
+
 .page-loading {
   min-height: 40vh;
   display: flex;

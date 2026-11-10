@@ -17,6 +17,7 @@ export interface PlaybackSnapshot {
   duration: number;
   wasPlaying: boolean;
   interrupted: boolean;
+  history: number[];
   updatedAt: number;
 }
 
@@ -64,6 +65,9 @@ export function readPlaybackSnapshot(
       duration: typeof data.duration === 'number' && Number.isFinite(data.duration) ? data.duration : 0,
       wasPlaying: !!data.wasPlaying,
       interrupted: !!data.interrupted,
+      history: Array.isArray(data.history)
+        ? data.history.filter((item) => Number.isInteger(item) && item >= 0)
+        : [],
       updatedAt: data.updatedAt,
     };
   } catch (error) {
@@ -91,6 +95,7 @@ export function snapshotFromPlayer(input: {
   duration: number;
   wasPlaying: boolean;
   interrupted: boolean;
+  history?: number[];
   updatedAt: number;
 }): PlaybackSnapshot | null {
   if (!input.sessionKey || !input.queue.length) return null;
@@ -103,6 +108,9 @@ export function snapshotFromPlayer(input: {
     duration: Number.isFinite(input.duration) ? Math.max(0, input.duration) : 0,
     wasPlaying: input.wasPlaying,
     interrupted: input.interrupted,
+    history: Array.isArray(input.history)
+      ? input.history.filter((item) => Number.isInteger(item) && item >= 0)
+      : [],
     updatedAt: input.updatedAt,
   };
 }

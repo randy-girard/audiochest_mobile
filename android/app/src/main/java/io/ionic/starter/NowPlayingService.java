@@ -21,6 +21,8 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
+import android.view.KeyEvent;
 import android.support.v4.media.MediaBrowserCompat;
 import android.support.v4.media.MediaMetadataCompat;
 import android.support.v4.media.session.MediaSessionCompat;
@@ -64,14 +66,18 @@ public class NowPlayingService extends MediaBrowserServiceCompat {
   private Object focusRequest;
   private boolean noisyRegistered;
   private Object deviceCallback;
+  private boolean holdingFocus;
+  private long focusRequestedAt;
+  private long lastApplyAt;
 
   private final AudioManager.OnAudioFocusChangeListener focusListener =
       new AudioManager.OnAudioFocusChangeListener() {
         @Override
         public void onAudioFocusChange(int focusChange) {
+          if (applyingState) return;
+          if (SystemClock.elapsedRealtime() - focusRequestedAt < 1000) return;
           if (focusChange == AudioManager.AUDIOFOCUS_LOSS
-              || focusChange == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT
-              || focusChange == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK) {
+              || focusChange == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) {
             emit("interrupt", null);
           } else if (focusChange == AudioManager.AUDIOFOCUS_GAIN && latest != null && latest.interrupted) {
             emit("play", null);
@@ -151,6 +157,7 @@ public class NowPlayingService extends MediaBrowserServiceCompat {
     mediaSession.setFlags(
         MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS | MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS
     );
+    mediaSession.setPlaybackToLocal(AudioManager.STREAM_MUSIC);
     mediaSession.setCallback(new MediaSessionCompat.Callback() {
       @Override
       public void onPlay() {
@@ -194,11 +201,41 @@ public class NowPlayingService extends MediaBrowserServiceCompat {
 
       @Override
       public boolean onMediaButtonEvent(Intent mediaButtonEvent) {
-        if (mediaButtonEvent != null && Intent.ACTION_MEDIA_BUTTON.equals(mediaButtonEvent.getAction())) {
-          super.onMediaButtonEvent(mediaButtonEvent);
+        KeyEvent event = mediaKey(mediaButtonEvent);
+        if (event == null || event.getAction() != KeyEvent.ACTION_DOWN) return false;
+        int key = event.getKeyCode();
+        if (event.getRepeatCount() > 0) {
+          if (key == KeyEvent.KEYCODE_MEDIA_FAST_FORWARD) onFastForward();
+          else if (key == KeyEvent.KEYCODE_MEDIA_REWIND) onRewind();
           return true;
         }
-        return super.onMediaButtonEvent(mediaButtonEvent);
+        switch (key) {
+          case KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE:
+          case KeyEvent.KEYCODE_HEADSETHOOK:
+          case KeyEvent.KEYCODE_MEDIA_PLAY:
+            if (latest != null && latest.playing) onPause();
+            else onPlay();
+            return true;
+          case KeyEvent.KEYCODE_MEDIA_PAUSE:
+            onPause();
+            return true;
+          case KeyEvent.KEYCODE_MEDIA_NEXT:
+          case KeyEvent.KEYCODE_MEDIA_SKIP_FORWARD:
+            onSkipToNext();
+            return true;
+          case KeyEvent.KEYCODE_MEDIA_PREVIOUS:
+          case KeyEvent.KEYCODE_MEDIA_SKIP_BACKWARD:
+            onSkipToPrevious();
+            return true;
+          case KeyEvent.KEYCODE_MEDIA_FAST_FORWARD:
+            onFastForward();
+            return true;
+          case KeyEvent.KEYCODE_MEDIA_REWIND:
+            onRewind();
+            return true;
+          default:
+            return false;
+        }
       }
     });
     Intent launch = getPackageManager().getLaunchIntentForPackage(getPackageName());
@@ -248,20 +285,36 @@ public class NowPlayingService extends MediaBrowserServiceCompat {
     super.onDestroy();
   }
 
+  @SuppressWarnings("deprecation")
+  private static KeyEvent mediaKey(Intent intent) {
+    if (intent == null) return null;
+    Object extra = intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT);
+    return extra instanceof KeyEvent ? (KeyEvent) extra : null;
+  }
+
+  private boolean isTransportEcho(String action) {
+    if (!"play".equals(action) && !"pause".equals(action)) return false;
+    if (SystemClock.elapsedRealtime() - lastApplyAt >= 500) return false;
+    if ("play".equals(action)) return latest != null && latest.playing;
+    return latest == null || !latest.playing;
+  }
+
   private void emit(String action, Double seekTime) {
     if (applyingState) return;
-    if ("interrupt".equals(action) && latest != null && latest.active) {
-      latest = latest.pausedInterrupted();
+    if (isTransportEcho(action)) return;
+    if (("pause".equals(action) || "interrupt".equals(action))
+        && latest != null && latest.active && latest.playing) {
+      latest = "interrupt".equals(action) ? latest.pausedInterrupted() : latest.withPlaying(false);
       latest.save(this);
       updateFromLatest();
     }
-    if (NowPlayingPlugin.emit(action, seekTime)) return;
-    pendingAction = action;
-    pendingSeek = seekTime;
-    NowPlayingState.savePending(this, action, seekTime);
-    if ("play".equals(action) || "nexttrack".equals(action) || "previoustrack".equals(action)) {
-      startUi(action, seekTime);
+    MainActivity activity = MainActivity.current();
+    if (activity != null) {
+      activity.dispatchTransport(action, seekTime);
+      return;
     }
+    queuePending(this, action, seekTime);
+    startUi(action, seekTime);
   }
 
   private void startUi(String action, Double seekTime) {
@@ -309,6 +362,7 @@ public class NowPlayingService extends MediaBrowserServiceCompat {
       }
     } finally {
       applyingState = false;
+      lastApplyAt = SystemClock.elapsedRealtime();
     }
   }
 
@@ -326,6 +380,7 @@ public class NowPlayingService extends MediaBrowserServiceCompat {
       }
     } finally {
       applyingState = false;
+      lastApplyAt = SystemClock.elapsedRealtime();
     }
     if (Build.VERSION.SDK_INT >= 24) {
       stopForeground(STOP_FOREGROUND_REMOVE);
@@ -432,8 +487,10 @@ public class NowPlayingService extends MediaBrowserServiceCompat {
   }
 
   private void requestFocus() {
-    if (audioManager == null) return;
+    if (audioManager == null || holdingFocus) return;
+    focusRequestedAt = SystemClock.elapsedRealtime();
     try {
+      int result;
       if (Build.VERSION.SDK_INT >= 26) {
         AudioFocusRequest request = (AudioFocusRequest) focusRequest;
         if (request == null) {
@@ -447,17 +504,20 @@ public class NowPlayingService extends MediaBrowserServiceCompat {
               .build();
           focusRequest = request;
         }
-        audioManager.requestAudioFocus(request);
+        result = audioManager.requestAudioFocus(request);
       } else {
-        audioManager.requestAudioFocus(focusListener, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN);
+        result = audioManager.requestAudioFocus(focusListener, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN);
       }
+      holdingFocus = result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+          || result == AudioManager.AUDIOFOCUS_REQUEST_DELAYED;
     } catch (Exception ignored) {
       // Focus is best-effort; the media session still advertises AudioChest to the car.
     }
   }
 
   private void abandonFocus() {
-    if (audioManager == null) return;
+    if (audioManager == null || !holdingFocus) return;
+    holdingFocus = false;
     try {
       if (Build.VERSION.SDK_INT >= 26 && focusRequest instanceof AudioFocusRequest) {
         audioManager.abandonAudioFocusRequest((AudioFocusRequest) focusRequest);

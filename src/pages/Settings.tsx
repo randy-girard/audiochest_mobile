@@ -17,6 +17,7 @@ import { useHistory } from 'react-router-dom';
 import { AuthError } from '../api';
 import { useAuth } from '../AuthContext';
 import { usePlayer } from '../PlayerContext';
+import AppUpdateSection from '../components/AppUpdateSection';
 import PageHeader from '../components/PageHeader';
 import { Instance } from '../types';
 import { errorMessage } from '../utils';
@@ -158,6 +159,8 @@ const Settings: React.FC = () => {
             </IonItemSliding>
           ))}
         </IonList>
+
+        <AppUpdateSection />
 
         <div className="ion-padding">
           <IonButton expand="block" onClick={() => history.push('/login?add=1')} disabled={busy || undefined}>

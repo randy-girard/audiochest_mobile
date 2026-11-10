@@ -50,24 +50,18 @@ public class NowPlayingPlugin extends Plugin {
     call.success(NowPlayingService.consumePendingAction(getContext()));
   }
 
-  static boolean emit(final String action, final Double seekTime) {
+  static boolean deliver(final String action, final Double seekTime) {
     final NowPlayingPlugin plugin = instance;
     if (plugin == null) return false;
-    final Runnable task = new Runnable() {
-      @Override
-      public void run() {
-        JSObject data = new JSObject();
-        data.put("action", action);
-        if (seekTime != null) data.put("seekTime", seekTime);
-        plugin.notifyListeners("action", data);
-      }
-    };
-    Activity activity = plugin.getActivity();
-    if (activity != null) {
-      activity.runOnUiThread(task);
-    } else {
-      task.run();
-    }
+    return plugin.deliverToPage(action, seekTime);
+  }
+
+  private boolean deliverToPage(String action, Double seekTime) {
+    JSObject data = new JSObject();
+    data.put("action", action);
+    if (seekTime != null) data.put("seekTime", seekTime);
+    if (!hasListeners("action")) return false;
+    notifyListeners("action", data, false);
     return true;
   }
 
@@ -76,9 +70,14 @@ public class NowPlayingPlugin extends Plugin {
     String action = intent.getStringExtra(EXTRA_ACTION);
     if (action == null || action.isEmpty()) return;
     Double seek = intent.hasExtra(EXTRA_SEEK) ? intent.getDoubleExtra(EXTRA_SEEK, 0d) : null;
-    Context context = instance != null ? instance.getContext() : null;
-    NowPlayingService.queuePending(context, action, seek);
     intent.removeExtra(EXTRA_ACTION);
     intent.removeExtra(EXTRA_SEEK);
+    MainActivity activity = MainActivity.current();
+    if (activity != null) {
+      activity.dispatchTransport(action, seek);
+      return;
+    }
+    Context context = instance != null ? instance.getContext() : null;
+    NowPlayingService.queuePending(context, action, seek);
   }
 }
