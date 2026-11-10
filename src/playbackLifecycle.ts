@@ -72,6 +72,21 @@ export function classifyPlayFailure(input: {
   return 'stop';
 }
 
+export function nextPlaybackStep(input: {
+  wantPlaying: boolean;
+  paused: boolean;
+  seeking: boolean;
+  allowDuringSeek?: boolean;
+}): 'play' | 'wait' | 'idle' {
+  if (!input.wantPlaying || !input.paused) return 'idle';
+  if (input.seeking && !input.allowDuringSeek) return 'wait';
+  return 'play';
+}
+
+export function canRetryAbortedPlay(retries: number, limit = 3): boolean {
+  return retries < limit;
+}
+
 export function decideEndedEvent(input: {
   wantPlaying: boolean;
   duration: number;

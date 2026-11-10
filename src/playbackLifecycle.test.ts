@@ -1,7 +1,9 @@
 import {
   applyPendingSeek,
+  canRetryAbortedPlay,
   classifyPlayFailure,
   decideEndedEvent,
+  nextPlaybackStep,
   decidePauseEvent,
   isDuplicateTransport,
   nextToggleAction,
@@ -152,6 +154,33 @@ describe('classifyPlayFailure', () => {
       wantPlaying: true,
       errorName: 'NotAllowedError',
     })).toBe('stop');
+  });
+});
+
+describe('nextPlaybackStep', () => {
+  it('plays a paused track once the seek has finished', () => {
+    expect(nextPlaybackStep({ wantPlaying: true, paused: true, seeking: false })).toBe('play');
+    expect(nextPlaybackStep({ wantPlaying: true, paused: true, seeking: true })).toBe('wait');
+  });
+
+  it('lets the play button start audio while a paused seek is still settling', () => {
+    expect(nextPlaybackStep({
+      wantPlaying: true,
+      paused: true,
+      seeking: true,
+      allowDuringSeek: true,
+    })).toBe('play');
+  });
+
+  it('does not start audio that is already playing or that the user paused', () => {
+    expect(nextPlaybackStep({ wantPlaying: true, paused: false, seeking: false })).toBe('idle');
+    expect(nextPlaybackStep({ wantPlaying: false, paused: true, seeking: false })).toBe('idle');
+  });
+
+  it('retries a seek-aborted play a few times', () => {
+    expect(canRetryAbortedPlay(0)).toBe(true);
+    expect(canRetryAbortedPlay(2)).toBe(true);
+    expect(canRetryAbortedPlay(3)).toBe(false);
   });
 });
 
