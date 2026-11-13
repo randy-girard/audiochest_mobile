@@ -1,4 +1,5 @@
 import {
+  decideEndedEvent,
   decidePauseEvent,
   decidePlaySettlement,
   PauseDecision,
@@ -42,6 +43,7 @@ export class PlaybackController {
   lastSeekAt = 0;
   unlocked = false;
   loading = false;
+  hasStarted = false;
   private token = 0;
   liveToken = 0;
 
@@ -80,6 +82,7 @@ export class PlaybackController {
     this.retries = 0;
     this.busy = false;
     this.wantPlaying = autoplay;
+    this.hasStarted = false;
     if (!autoplay) {
       this.loading = false;
       return [{ type: 'show-paused' }];
@@ -101,6 +104,29 @@ export class PlaybackController {
     this.loading = false;
     this.generation += 1;
     this.retries = 0;
+  }
+
+  holdSourceChange(): void {
+    this.hasStarted = false;
+    this.loading = true;
+  }
+
+  noteSample(sample: { paused: boolean; currentTime: number; duration: number; startAtZero: boolean }): void {
+    if (this.loading || sample.paused) return;
+    if (!(sample.duration > 0)) return;
+    if (sample.startAtZero && sample.currentTime > 1) return;
+    const lead = Math.min(1, sample.duration / 2);
+    if (sample.currentTime + lead < sample.duration) this.hasStarted = true;
+  }
+
+  acceptEnded(sample: { currentTime: number; duration: number }): 'advance' | 'ignore' {
+    return decideEndedEvent({
+      wantPlaying: this.wantPlaying,
+      duration: sample.duration,
+      currentTime: sample.currentTime,
+      loading: this.loading,
+      hasStarted: this.hasStarted,
+    });
   }
 
   acceptPlay(effect: Extract<PlaybackEffect, { type: 'play' }>, media: MediaSnap): 'play' | 'kick' | null {

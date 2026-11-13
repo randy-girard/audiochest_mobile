@@ -12,9 +12,11 @@ import {
   shouldApplyRemoteTransport,
   shouldIgnoreInterrupt,
   shouldIgnorePlayRejection,
+  shouldIgnoreRemoteSkip,
   shouldIssuePlay,
   shouldRestorePlayback,
   shouldResumeAfterIgnoredPause,
+  shouldRewindStalePosition,
 } from './playbackLifecycle';
 
 describe('decidePauseEvent', () => {
@@ -263,6 +265,61 @@ describe('decideEndedEvent', () => {
   it('advances when a real track ends', () => {
     expect(decideEndedEvent({ wantPlaying: false, duration: 240 })).toBe('advance');
     expect(decideEndedEvent({ wantPlaying: true, duration: 240 })).toBe('advance');
+  });
+
+  it('does not skip again when Android emits ended while the next song is loading', () => {
+    // A finished song advances once. Changing src then fires ended again with the
+    // previous duration still attached, and pressing Next does the same. That
+    // second event is what lands on the track after the next one, and it keeps
+    // firing on every automatic advance until a song is chosen directly.
+    expect(decideEndedEvent({
+      wantPlaying: true,
+      duration: 180,
+      currentTime: 180,
+      loading: true,
+      hasStarted: false,
+    })).toBe('ignore');
+    expect(decideEndedEvent({
+      wantPlaying: true,
+      duration: 180,
+      currentTime: 20,
+      loading: false,
+      hasStarted: false,
+    })).toBe('ignore');
+    expect(decideEndedEvent({
+      wantPlaying: true,
+      duration: 180,
+      currentTime: 12,
+      loading: false,
+      hasStarted: true,
+    })).toBe('ignore');
+  });
+
+  it('advances after the song that actually started reaches the end', () => {
+    expect(decideEndedEvent({
+      wantPlaying: true,
+      duration: 180,
+      currentTime: 180,
+      loading: false,
+      hasStarted: true,
+    })).toBe('advance');
+  });
+});
+
+describe('shouldRewindStalePosition', () => {
+  it('pulls a new song back to the start when it is still at the previous position', () => {
+    expect(shouldRewindStalePosition({ startAtZero: true, hasStarted: false, currentTime: 176 })).toBe(true);
+    expect(shouldRewindStalePosition({ startAtZero: true, hasStarted: false, currentTime: 0.2 })).toBe(false);
+    expect(shouldRewindStalePosition({ startAtZero: false, hasStarted: false, currentTime: 176 })).toBe(false);
+    expect(shouldRewindStalePosition({ startAtZero: true, hasStarted: true, currentTime: 40 })).toBe(false);
+  });
+});
+
+describe('shouldIgnoreRemoteSkip', () => {
+  it('ignores a headset next that echoes a track change the app just made', () => {
+    expect(shouldIgnoreRemoteSkip({ lastTrackChangeAt: 5_000, now: 5_400 })).toBe(true);
+    expect(shouldIgnoreRemoteSkip({ lastTrackChangeAt: 5_000, now: 6_500 })).toBe(false);
+    expect(shouldIgnoreRemoteSkip({ lastTrackChangeAt: 0, now: 6_500 })).toBe(false);
   });
 });
 

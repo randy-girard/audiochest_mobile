@@ -17,11 +17,12 @@ import {
 import { RepeatMode, cycleRepeatMode, nextIndexOnEnd, sameTrackQueue } from './playerAdvance';
 import {
   applyPendingSeek as resolvePendingSeek,
-  decideEndedEvent,
   isDuplicateTransport,
   shouldApplyRemoteTransport,
   shouldIgnoreInterrupt,
+  shouldIgnoreRemoteSkip,
   shouldRestorePlayback,
+  shouldRewindStalePosition,
 } from './playbackLifecycle';
 import { dispatchPlayback, PlaybackController, PlaybackEffect } from './playbackSession';
 import { previousFromHistory, pushPlayHistory } from './playerHistory';
@@ -136,6 +137,9 @@ export const PlayerProvider: React.FC = ({ children }) => {
   const playRetryTimer = useRef(0);
   const lastPlayCommandAt = useRef(0);
   const lastPauseCommandAt = useRef(0);
+  const lastTrackChangeAt = useRef(0);
+  const lastLocalNextAt = useRef(0);
+  const startAtZeroRef = useRef(false);
 
   useEffect(() => {
     sessionKeyRef.current = sessionKey;
@@ -168,12 +172,13 @@ export const PlayerProvider: React.FC = ({ children }) => {
     if (!force && now - lastPersistAt.current < 1500) return;
     const items = queueRef.current;
     const audio = audioRef.current;
+    const holdingStart = startAtZeroRef.current && !sessionRef.current.hasStarted;
     const snapshot = snapshotFromPlayer({
       sessionKey: key,
       queue: items,
       index: indexRef.current,
-      position: audio ? audio.currentTime || 0 : 0,
-      duration: audio && Number.isFinite(audio.duration) ? audio.duration : 0,
+      position: holdingStart ? 0 : (audio ? audio.currentTime || 0 : 0),
+      duration: holdingStart ? 0 : (audio && Number.isFinite(audio.duration) ? audio.duration : 0),
       wasPlaying: sessionRef.current.wantPlaying || interruptedRef.current,
       interrupted: interruptedRef.current,
       history: historyRef.current,
@@ -187,8 +192,9 @@ export const PlayerProvider: React.FC = ({ children }) => {
   persistSnapshotRef.current = persistSnapshot;
 
   const syncTimes = useCallback((audio: HTMLAudioElement) => {
-    const nextDuration = Number.isFinite(audio.duration) ? audio.duration : 0;
-    setCurrentTime(audio.currentTime || 0);
+    const holdingStart = startAtZeroRef.current && !sessionRef.current.hasStarted;
+    const nextDuration = holdingStart ? 0 : (Number.isFinite(audio.duration) ? audio.duration : 0);
+    setCurrentTime(holdingStart ? 0 : (audio.currentTime || 0));
     setDuration(nextDuration);
   }, []);
 
@@ -239,6 +245,8 @@ export const PlayerProvider: React.FC = ({ children }) => {
     if (!audio) return;
     interruptedRef.current = false;
     pendingSeekRef.current = position > 0 ? position : 0;
+    startAtZeroRef.current = !(position > 0);
+    lastTrackChangeAt.current = Date.now();
     if (autoplay) lastPlayCommandAt.current = Date.now();
     const effects = sessionRef.current.armLoad(autoplay);
     audio.src = api.audioSrc(track);
@@ -261,6 +269,9 @@ export const PlayerProvider: React.FC = ({ children }) => {
   const replayCurrent = useCallback(() => {
     const audio = audioRef.current;
     if (!audio) return;
+    startAtZeroRef.current = true;
+    lastTrackChangeAt.current = Date.now();
+    sessionRef.current.hasStarted = false;
     audio.currentTime = 0;
     setCurrentTime(0);
     interruptedRef.current = false;
@@ -315,11 +326,36 @@ export const PlayerProvider: React.FC = ({ children }) => {
     audio.style.display = 'none';
     document.body.appendChild(audio);
     audioRef.current = audio;
-    const onEnded = () => {
-      if (decideEndedEvent({
-        wantPlaying: sessionRef.current.wantPlaying,
+    const notePosition = () => {
+      const currentTime = audio.currentTime || 0;
+      if (shouldRewindStalePosition({
+        startAtZero: startAtZeroRef.current,
+        hasStarted: sessionRef.current.hasStarted,
+        currentTime,
+      })) {
+        try {
+          audio.currentTime = 0;
+        } catch (error) {
+          // Seek can fail before metadata; a later event retries.
+        }
+      }
+      sessionRef.current.noteSample({
+        paused: audio.paused,
+        currentTime: audio.currentTime || 0,
         duration: Number.isFinite(audio.duration) ? audio.duration : 0,
-      }) === 'ignore') return;
+        startAtZero: startAtZeroRef.current,
+      });
+      if (sessionRef.current.hasStarted) startAtZeroRef.current = false;
+    };
+    const onEnded = () => {
+      const currentTime = audio.currentTime || 0;
+      if (sessionRef.current.acceptEnded({
+        currentTime,
+        duration: Number.isFinite(audio.duration) ? audio.duration : 0,
+      }) === 'ignore') {
+        notePosition();
+        return;
+      }
       sessionRef.current.noteEnded();
       interruptedRef.current = false;
       playNextFrom(indexRef.current, true);
@@ -329,6 +365,7 @@ export const PlayerProvider: React.FC = ({ children }) => {
         paused: audio.paused,
         seeking: Boolean(audio.seeking),
       });
+      notePosition();
       if (outcome.decision === 'playing') {
         interruptedRef.current = false;
         dispatchRef.current(outcome.effects);
@@ -350,12 +387,14 @@ export const PlayerProvider: React.FC = ({ children }) => {
     };
     const onTime = () => {
       applyPendingSeek(audio);
+      notePosition();
       syncTimes(audio);
       persistSnapshotRef.current(false);
       syncNowPlayingRef.current(false);
     };
     const onLoaded = () => {
       applyPendingSeek(audio);
+      notePosition();
       syncTimes(audio);
       dispatchRef.current(sessionRef.current.onCanPlay({
         paused: audio.paused,
@@ -494,6 +533,14 @@ export const PlayerProvider: React.FC = ({ children }) => {
   }, [clearPlayRetry]);
 
   const next = useCallback(() => {
+    const now = Date.now();
+    if (isDuplicateTransport({
+      action: 'nexttrack',
+      lastAction: 'nexttrack',
+      lastActionAt: lastLocalNextAt.current,
+      now,
+    })) return;
+    lastLocalNextAt.current = now;
     playNextFrom(indexRef.current, false);
   }, [playNextFrom]);
 
@@ -523,6 +570,8 @@ export const PlayerProvider: React.FC = ({ children }) => {
     if (!audio) return;
     const max = Number.isFinite(audio.duration) ? audio.duration : seconds;
     const nextTime = Math.max(0, Math.min(seconds, max || seconds));
+    startAtZeroRef.current = false;
+    sessionRef.current.hasStarted = true;
     sessionRef.current.noteSeek(Date.now());
     audio.currentTime = nextTime;
     setCurrentTime(nextTime);
@@ -536,6 +585,8 @@ export const PlayerProvider: React.FC = ({ children }) => {
     const current = audio.currentTime || 0;
     const max = Number.isFinite(audio.duration) ? audio.duration : Math.max(0, current + delta);
     const nextTime = Math.max(0, Math.min(current + delta, max || 0));
+    startAtZeroRef.current = false;
+    sessionRef.current.hasStarted = true;
     sessionRef.current.noteSeek(Date.now());
     audio.currentTime = nextTime;
     setCurrentTime(nextTime);
@@ -567,11 +618,14 @@ export const PlayerProvider: React.FC = ({ children }) => {
     interruptedRef.current = false;
     pendingPlayRef.current = false;
     dispatchRef.current(sessionRef.current.requestPause(now));
+    sessionRef.current.holdSourceChange();
+    startAtZeroRef.current = false;
     if (audio) {
       audio.removeAttribute('src');
       audio.removeAttribute('title');
       audio.load();
     }
+    sessionRef.current.loading = false;
     setQueue([]);
     setIndex(0);
     setPlaying(false);
@@ -625,9 +679,10 @@ export const PlayerProvider: React.FC = ({ children }) => {
     const items = queueRef.current;
     const track = items[indexRef.current];
     const audio = audioRef.current;
+    const holdingStart = startAtZeroRef.current && !sessionRef.current.hasStarted;
     const info = nowPlayingInfo(track, {
-      currentTime: audio ? audio.currentTime || 0 : 0,
-      duration: audio && Number.isFinite(audio.duration) ? audio.duration : 0,
+      currentTime: holdingStart ? 0 : (audio ? audio.currentTime || 0 : 0),
+      duration: holdingStart ? 0 : (audio && Number.isFinite(audio.duration) ? audio.duration : 0),
       playing: audio ? reportedPlaying(audio.paused, sessionRef.current.wantPlaying) : false,
       interrupted: interruptedRef.current,
     });
@@ -714,6 +769,7 @@ export const PlayerProvider: React.FC = ({ children }) => {
       next: () => {
         const now = Date.now();
         if (isDuplicateTransport({ action: 'nexttrack', lastAction: lastRemote.action, lastActionAt: lastRemote.at, now })) return;
+        if (shouldIgnoreRemoteSkip({ lastTrackChangeAt: lastTrackChangeAt.current, now })) return;
         claimRemote('nexttrack', now);
         if (!readyForTransport('nexttrack')) return;
         handlersRef.current.next();

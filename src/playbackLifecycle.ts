@@ -1,6 +1,7 @@
 export type PauseDecision = 'playing' | 'ignore' | 'paused' | 'suppress';
 
 export const TRANSPORT_ECHO_MS = 600;
+export const SKIP_ECHO_MS = 1000;
 export const INTERRUPT_GRACE_MS = 800;
 export const PAUSE_TOGGLE_SETTLE_MS = 400;
 export const PLAY_RETRY_LIMIT = 6;
@@ -164,9 +165,33 @@ export function shouldResumeAfterIgnoredPause(input: {
 export function decideEndedEvent(input: {
   wantPlaying: boolean;
   duration: number;
+  currentTime?: number;
+  loading?: boolean;
+  hasStarted?: boolean;
 }): 'advance' | 'ignore' {
-  if (input.wantPlaying && !(input.duration > 0)) return 'ignore';
+  if (input.loading) return 'ignore';
+  if (input.hasStarted === false) return 'ignore';
+  if (!(input.duration > 0)) return 'ignore';
+  if (input.currentTime != null && input.currentTime < input.duration - 1) return 'ignore';
   return 'advance';
+}
+
+export function shouldRewindStalePosition(input: {
+  startAtZero: boolean;
+  hasStarted: boolean;
+  currentTime: number;
+}): boolean {
+  return input.startAtZero && !input.hasStarted && input.currentTime > 1;
+}
+
+export function shouldIgnoreRemoteSkip(input: {
+  lastTrackChangeAt: number;
+  now: number;
+  windowMs?: number;
+}): boolean {
+  if (!(input.lastTrackChangeAt > 0)) return false;
+  const windowMs = input.windowMs == null ? SKIP_ECHO_MS : input.windowMs;
+  return input.now - input.lastTrackChangeAt < windowMs;
 }
 
 export function shouldRestorePlayback(input: {

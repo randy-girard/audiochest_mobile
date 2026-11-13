@@ -238,3 +238,43 @@ describe('pause, seek, then play', () => {
     expect(audio.paused).toBe(false);
   });
 });
+
+describe('android track advance', () => {
+  it('advances one song when ended fires again while the next song is loading', () => {
+    const controller = new PlaybackController();
+    const advances: number[] = [];
+    let index = 0;
+    const finish = (duration: number, currentTime: number) => {
+      if (controller.acceptEnded({ duration, currentTime }) === 'ignore') return;
+      controller.noteEnded();
+      index += 1;
+      advances.push(index);
+      controller.armLoad(true);
+    };
+
+    controller.armLoad(true);
+    controller.onTransportEvent({ paused: false, seeking: false });
+    controller.noteSample({ paused: false, currentTime: 4, duration: 180, startAtZero: false });
+    finish(180, 180);
+    finish(180, 180);
+    expect(advances).toEqual([1]);
+
+    controller.onTransportEvent({ paused: false, seeking: false });
+    controller.noteSample({ paused: false, currentTime: 0.2, duration: 200, startAtZero: true });
+    finish(200, 200);
+    expect(advances).toEqual([1, 2]);
+  });
+
+  it('does not skip a second song when next loads one and the element emits ended', () => {
+    const controller = new PlaybackController();
+    controller.armLoad(true);
+    controller.onTransportEvent({ paused: false, seeking: false });
+    controller.noteSample({ paused: false, currentTime: 25, duration: 180, startAtZero: false });
+
+    controller.armLoad(true);
+    controller.noteSample({ paused: false, currentTime: 25, duration: 180, startAtZero: true });
+    expect(controller.hasStarted).toBe(false);
+    expect(controller.acceptEnded({ duration: 180, currentTime: 180 })).toBe('ignore');
+    expect(controller.acceptEnded({ duration: 180, currentTime: 25 })).toBe('ignore');
+  });
+});
